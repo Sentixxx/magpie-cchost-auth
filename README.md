@@ -81,7 +81,7 @@ Provider plugin for **[CC Host (`cchost.ai`)](https://cchost.ai/docs/usage)** on
    - 文件导入（`auth.import`，支持 JSON / Claude Code `settings.json` / `.env`）默认也采用纯 N 卡模式。
 3. **1 张汇总路由卡 + N 张只读节点子卡（`split_with_primary`，共 N+1 张）**
    - 仅主卡暴露模型并负责路由，N 张子卡设为 `usageOnly`（空模型表）纯做独立曲线观测（Magpie 顶部会计数为 N+1；文件导入时显式设置 `"includeEndpointCard": true` 可启用）。
-   - 同时保留 **「CC Host 单个上游账号（独立额度卡片）」** 登录方式用于手动单加某一个节点。
+   - 对于 CC Host `/v1/usage` 中未返回名称的匿名 UUID 节点，插件会按稳定排序自动编号为 `Claude #1`、`Claude #2`、`Claude #3`，全程无需用户手填节点 ID。
 
 ---
 

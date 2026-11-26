@@ -410,7 +410,9 @@ describe("parseCchostUsage", () => {
 
     assert.equal(parsed.nodes.length, 3)
     assert.equal(parsed.nodes[0].id, "11111111-1111-4111-8111-111111111111")
-    assert.equal(parsed.nodes[0].name, "Claude 11111111")
+    assert.equal(parsed.nodes[0].name, "Claude #1")
+    assert.equal(parsed.nodes[1].name, "Claude #2")
+    assert.equal(parsed.nodes[2].name, "Claude #3")
     // Disabled spend must NOT be emitted as a window
     assert.equal(parsed.nodes[0].windows.some((w) => w.key === "spend"), false)
     assert.equal(parsed.nodes[0].windows.find((w) => w.kind === "five_hour").used, 5)

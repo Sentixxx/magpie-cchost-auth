@@ -48,9 +48,8 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     await hooks.config(cfg)
     assert.equal(cfg.provider.cchost.name, "CC Host")
     assert.equal(hooks.auth.provider, "cchost")
-    assert.equal(hooks.auth.methods.length, 2)
+    assert.equal(hooks.auth.methods.length, 1)
     assert.equal(hooks.auth.methods[0].type, "api")
-    assert.equal(hooks.auth.methods[1].type, "api")
     assert.equal(typeof hooks.auth.methods[0].authorize, "function")
     assert.equal(typeof hooks.auth.import, "function")
     assert.equal(typeof hooks.auth.usage, "function")
@@ -379,17 +378,6 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     assert.equal(proCard.usage.windows.find((w) => w.name === "5 hours").used, 80)
     assert.equal(proCard.usage.windows.find((w) => w.name === "7 days").used, 90)
     assert.equal(proCard.usage.windows.find((w) => w.name.includes("Fable")), undefined)
-
-    // Also verify Method 1 (interactive single upstream account login)
-    const singleNodeSignIn = await hooks.auth.methods[1].authorize({
-      baseUrl: mock.baseUrl,
-      apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
-      nodeSelector: "Claude-Max20x",
-    })
-    assert.equal(singleNodeSignIn.type, "success")
-    assert.equal(singleNodeSignIn.metadata.role, "node")
-    assert.equal(singleNodeSignIn.metadata.nodeId, "c-20x")
-    assert.equal(singleNodeSignIn.metadata.usageOnly, true)
 
     // Verify graceful error if a previously imported node was removed from CC Host
     const missingAuth = {
