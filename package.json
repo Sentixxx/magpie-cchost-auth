@@ -1,0 +1,49 @@
+{
+  "name": "magpie-cchost-auth",
+  "version": "0.1.0",
+  "description": "Provider plugin for CC Host (cchost.ai) endpoints with 5h/7d/Fable subscription quota sensing and multi-subscription aggregation",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./server": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "lib/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "mock": "node mock/cchost-mock-server.mjs"
+  },
+  "keywords": [
+    "cchost",
+    "quota",
+    "provider"
+  ],
+  "license": "MIT",
+  "magpie": {
+    "name": "CC Host",
+    "summary": {
+      "en": "Use a CC Host access point as a subscription with 5h/7d quota tracking and multi-account aggregation.",
+      "zh": "将 CC Host 接入点视为订阅接入 Magpie，支持 5h/7d 额度感知与多订阅聚合计算。"
+    },
+    "icon": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23111827'/><path d='M18 32a14 14 0 0 1 24.4-9.3l-4.6 4.6A7.5 7.5 0 1 0 38 37.3l4.6 4.6A14 14 0 0 1 18 32Z' fill='%2338bdf8'/><circle cx='44' cy='32' r='6' fill='%2334d399'/></svg>",
+    "maxConcurrency": 10,
+    "options": {
+      "aggregation": "weighted",
+      "utilizationScale": "auto",
+      "crossWindowCoupling": true,
+      "nodeWeights": {},
+      "tierWeights": {
+        "claude:max_20x": 20,
+        "claude:max_5x": 5,
+        "claude:pro": 1,
+        "codex:pro": 10,
+        "codex:plus": 1
+      },
+      "requestTimeoutMs": 15000
+    }
+  }
+}
