@@ -555,20 +555,23 @@ describe("aggregateCchostUsage — edge cases & Smart routing integration", () =
     const withBreakdown = runPipeline(payload, { showNodeBreakdown: true })
     const withoutBreakdown = runPipeline(payload, { showNodeBreakdown: false })
 
-    // Primary has 3 bars (5h, 7d, Fable), Backup has 2 bars (5h, 7d), Laptop has 1 offline status row = 6 aside rows
+    // Pool has 3 windows (5h, 7d, Fable) -> odd count adds 1 "Nodes" alignment cell,
+    // plus Primary (5h, 7d, Fable = 3), Backup (5h, 7d = 2), Laptop (offline = 1) = 7 aside rows
     const asideRows = withBreakdown.usage.windows.filter((w) => w.aside)
-    assert.equal(asideRows.length, 6)
+    assert.equal(asideRows.length, 7)
+    assert.equal(asideRows[0].name, "Nodes")
+    assert.equal(asideRows[0].display, "1/3 ready")
 
     // Crucial Magpie UI contract: Primary's 0% aside bar MUST NOT turn into text (`w.text === false`)!
     const primary5hQuota = withBreakdown.quota.windows.find(
-      (w) => w.aside && w.name === "Primary (Max 20x) · 5 hours",
+      (w) => w.aside && w.name === "Primary (Max 20x) · 5h",
     )
     assert.equal(primary5hQuota.used, 0)
     assert.equal(primary5hQuota.text, false)
     assert.equal(guiQuotaText(primary5hQuota), "0% used")
 
     const primaryFableQuota = withBreakdown.quota.windows.find(
-      (w) => w.aside && w.name === "Primary (Max 20x) · 7 days · Fable",
+      (w) => w.aside && w.name === "Primary (Max 20x) · Fable",
     )
     assert.equal(primaryFableQuota.used, 45)
     assert.equal(primaryFableQuota.text, false)

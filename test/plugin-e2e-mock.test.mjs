@@ -116,12 +116,13 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     assert.equal(wFable.used, 58)
     assert.equal(allowance.forModel("claude-sonnet-4-6").used, 38.1)
     assert.equal(allowance.forModel("claude-fable-5").used, 58)
-    // Breakdown switch expands each upstream account into real aside progress bars:
-    // Max20x (5h, 7d, Fable) + Max5x (5h, 7d, Fable) + Pro (5h, 7d) = 8 aside bars
+    // Breakdown switch expands each upstream account cleanly aligned to Magpie's 2-column grid:
+    // 1 Nodes alignment cell (since pool has 3 windows) + 3×(5h,7d) + 2×Fable = 9 aside entries
     const asideBars = hostUsage.windows.filter((w) => w.aside)
-    assert.equal(asideBars.length, 8)
+    assert.equal(asideBars.length, 9)
+    assert.equal(asideBars[0].name, "Nodes")
     assert.ok(asideBars.some((w) => w.name.includes("Claude-Max20x") && w.name.includes("Fable") && w.used === 50))
-    assert.ok(asideBars.some((w) => w.name.includes("Claude-Max5x") && w.name.includes("5 hours") && w.used === 100))
+    assert.ok(asideBars.some((w) => w.name.includes("Claude-Max5x") && w.name.includes("5h") && w.used === 100))
 
     // 5. Loader fetch sends Anthropic Messages with x-api-key ONLY (never both auth headers!)
     const loaded = await hooks.auth.loader(getAuth)
