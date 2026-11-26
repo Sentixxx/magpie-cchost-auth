@@ -312,4 +312,124 @@ describe("parseCchostUsage", () => {
     assert.equal(parsed.nodes[1].name, "Account-B")
     assert.equal(parsed.nodes[1].windows.find((w) => w.kind === "five_hour").used, 40)
   })
+
+  it("parses exact CC Host usage schema: usage.fiveHour/sevenDay, usage.scopedLimits (Fable), disabled spend ignored, resetCredits, and UUID nodeId", () => {
+    const parsed = parseCchostUsage(
+      {
+        nodes: [
+          {
+            nodeId: "11111111-1111-4111-8111-111111111111",
+            groupId: null,
+            accountType: "claude",
+            usage: {
+              spend: {
+                enabled: false,
+                percent: 0,
+                currency: "USD",
+                resetsAt: null,
+                usedMinor: 0,
+                limitMinor: null,
+              },
+              fiveHour: { resetsAt: inHours(1.5), utilization: 5 },
+              sevenDay: { resetsAt: inDays(3), utilization: 72 },
+              extraUsage: { currency: null, isEnabled: false, usedCredits: null, utilization: null, monthlyLimit: null },
+              resetCredits: { credits: [], availableCount: 0, applicableCount: 0 },
+              scopedLimits: [
+                {
+                  kind: "weekly_scoped",
+                  model: "Fable",
+                  percent: 100,
+                  ownQuota: false,
+                  resetsAt: inDays(3),
+                  severity: "critical",
+                },
+              ],
+              sevenDayOpus: null,
+              sevenDaySonnet: null,
+              purchasedCredits: null,
+            },
+            fetchedAt: new Date(NOW).toISOString(),
+          },
+          {
+            nodeId: "22222222-2222-4222-8222-222222222222",
+            groupId: null,
+            accountType: "claude",
+            usage: {
+              spend: { enabled: false, percent: 0, currency: "USD", resetsAt: null, usedMinor: 0, limitMinor: null },
+              fiveHour: { resetsAt: inHours(1.6), utilization: 0 },
+              sevenDay: { resetsAt: inDays(6), utilization: 8 },
+              extraUsage: { currency: null, isEnabled: false, usedCredits: null, utilization: null, monthlyLimit: null },
+              resetCredits: { credits: [{ expiresAt: inDays(2), window: "weekly" }], availableCount: 1, applicableCount: 1 },
+              scopedLimits: [
+                {
+                  kind: "weekly_scoped",
+                  model: "Fable",
+                  percent: 15,
+                  ownQuota: false,
+                  resetsAt: inDays(6),
+                  severity: "normal",
+                },
+              ],
+              sevenDayOpus: null,
+              sevenDaySonnet: null,
+              purchasedCredits: null,
+            },
+            fetchedAt: new Date(NOW).toISOString(),
+          },
+          {
+            nodeId: "33333333-3333-4333-8333-333333333333",
+            groupId: null,
+            accountType: "claude",
+            usage: {
+              spend: { enabled: true, percent: 40, currency: "USD", resetsAt: inDays(10), usedMinor: 2000, limitMinor: 5000 },
+              fiveHour: { resetsAt: inHours(0.8), utilization: 9 },
+              sevenDay: { resetsAt: inDays(4), utilization: 33 },
+              extraUsage: { currency: null, isEnabled: false, usedCredits: null, utilization: null, monthlyLimit: null },
+              resetCredits: { credits: [], availableCount: 0, applicableCount: 0 },
+              scopedLimits: [
+                {
+                  kind: "weekly_scoped",
+                  model: "Fable",
+                  percent: 64,
+                  ownQuota: false,
+                  resetsAt: inDays(4),
+                  severity: "normal",
+                },
+              ],
+              sevenDayOpus: null,
+              sevenDaySonnet: null,
+              purchasedCredits: null,
+            },
+            fetchedAt: new Date(NOW).toISOString(),
+          },
+        ],
+        summary: { maxUtilization: 72 },
+      },
+      { now: NOW },
+    )
+
+    assert.equal(parsed.nodes.length, 3)
+    assert.equal(parsed.nodes[0].id, "11111111-1111-4111-8111-111111111111")
+    assert.equal(parsed.nodes[0].name, "Claude 11111111")
+    // Disabled spend must NOT be emitted as a window
+    assert.equal(parsed.nodes[0].windows.some((w) => w.key === "spend"), false)
+    assert.equal(parsed.nodes[0].windows.find((w) => w.kind === "five_hour").used, 5)
+    assert.equal(parsed.nodes[0].windows.find((w) => w.kind === "seven_day").used, 72)
+    const fable0 = parsed.nodes[0].windows.find((w) => w.model === "fable")
+    assert.equal(fable0.kind, "model_seven_day")
+    assert.equal(fable0.used, 100)
+    assert.equal(fable0.name, "7 days · Fable")
+    assert.equal(parsed.nodes[0].resets, null)
+
+    // Node 2 has 1 reset credit parsed from usage.resetCredits
+    assert.equal(parsed.nodes[1].resets.count, 1)
+    assert.equal(parsed.nodes[1].windows.find((w) => w.model === "fable").used, 15)
+
+    // Node 3 has enabled spend ($20 / $50 USD) parsed as kind="spend"
+    const spend3 = parsed.nodes[2].windows.find((w) => w.kind === "spend")
+    assert.equal(spend3.amount, 20)
+    assert.equal(spend3.limit, 50)
+    assert.equal(spend3.unit, "USD")
+    assert.equal(parsed.nodes[2].windows.find((w) => w.model === "fable").used, 64)
+  })
 })
