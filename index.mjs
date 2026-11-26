@@ -39,6 +39,47 @@ const FALLBACK_MODELS = {
   },
 }
 
+function stableNodeSlotKey(baseUrl, nodeId) {
+  // Deterministic FNV-1a 64-bit hash so re-signing-in to the same endpoint
+  // updates existing per-node cards in place instead of creating duplicates.
+  const text = `${baseUrl}\0${nodeId}`
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
+    h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b) >>> 0
+  }
+  const suffix = `${h1.toString(36).padStart(7, "0")}${h2.toString(36).padStart(5, "0")}`.slice(0, 10)
+  return `${PROVIDER_ID}#nd_${suffix}`
+}
+
+function buildNodeCardMetadataList(nodes, { baseUrl, endpointLabel, aggregation, usageOnly }) {
+  const seenNames = new Map()
+  return nodes.map((node) => {
+    const baseNodeName = node.name || node.id
+    const count = (seenNames.get(baseNodeName.toLowerCase()) ?? 0) + 1
+    seenNames.set(baseNodeName.toLowerCase(), count)
+    const uniqueNodeName =
+      count > 1 ? `${baseNodeName} (${node.id.slice(-4)})` : baseNodeName
+    const cardLabel = `${endpointLabel} · ${uniqueNodeName}`
+    return {
+      slotKey: stableNodeSlotKey(baseUrl, node.id),
+      metadata: {
+        baseUrl,
+        label: cardLabel,
+        email: cardLabel,
+        aggregation,
+        role: "node",
+        nodeId: node.id,
+        nodeName: node.name,
+        accountType: node.accountType,
+        usageOnly,
+      },
+    }
+  })
+}
+
 function readOptionSwitches(input) {
   try {
     if (typeof input?.magpie?.options === "function") {
@@ -210,29 +251,17 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
           // 2. One independent subscription card per upstream node (when >1 node, or when
           //    includeEndpointCard is false so user wants node cards only)
           if (nodes.length > 1 || !spec.includeEndpointCard) {
-            const seenNames = new Map()
-            for (const node of nodes) {
-              const baseNodeName = node.name || node.id
-              const count = (seenNames.get(baseNodeName.toLowerCase()) ?? 0) + 1
-              seenNames.set(baseNodeName.toLowerCase(), count)
-              const uniqueNodeName =
-                count > 1 ? `${baseNodeName} (${node.id.slice(-4)})` : baseNodeName
-              const cardLabel = `${endpointLabel} · ${uniqueNodeName}`
-
+            const nodeCards = buildNodeCardMetadataList(nodes, {
+              baseUrl: spec.baseUrl,
+              endpointLabel,
+              aggregation: spec.aggregation,
+              usageOnly: spec.includeEndpointCard,
+            })
+            for (const card of nodeCards) {
               results.push({
                 type: "success",
                 key: spec.apiKey,
-                metadata: {
-                  baseUrl: spec.baseUrl,
-                  label: cardLabel,
-                  email: cardLabel,
-                  aggregation: spec.aggregation,
-                  role: "node",
-                  nodeId: node.id,
-                  nodeName: node.name,
-                  accountType: node.accountType,
-                  usageOnly: spec.includeEndpointCard,
-                },
+                metadata: card.metadata,
               })
             }
           }
@@ -324,6 +353,31 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
                 },
               ],
             },
+            {
+              type: "select",
+              key: "splitMode",
+              message: "Multi-account card layout",
+              messages: {
+                zh: "多账号展示方式",
+                "zh-TW": "多帳號顯示方式",
+              },
+              options: [
+                {
+                  label: "Auto-split each upstream account into its own card (Recommended)",
+                  value: "split",
+                  hint: "Creates 1 routing card + 1 independent quota card per upstream node directly (no file import needed)",
+                  labels: { zh: "自动拆成多张独立卡片（推荐，无需导入文件）" },
+                  hints: { zh: "1 张主卡负责路由 + 接入点下每个上游账号各自 1 张独立额度卡片" },
+                },
+                {
+                  label: "Single combined endpoint card",
+                  value: "single",
+                  hint: "Keep 1 card for the whole endpoint (expand per-node bars inside Usage)",
+                  labels: { zh: "合并为单张接入点卡片" },
+                  hints: { zh: "只保留 1 张汇总卡（可在 Usage 页下方展开节点进度条）" },
+                },
+              ],
+            },
           ],
 
           async authorize(inputs = {}, { signal } = {}) {
@@ -336,16 +390,21 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
               return { type: "failed", error: "API Key is required" }
             }
             const aggregation = inputs.aggregation || "weighted"
+            const splitMode = inputs.splitMode === "single" ? "single" : "split"
 
-            let endpointName = ""
+            let parsedUsage = null
             try {
               const usagePayload = await fetchCchostUsage(baseUrl, apiKey, {
                 signal,
                 timeoutMs: pluginOptions?.requestTimeoutMs ?? 15000,
                 fetchImpl,
               })
-              const parsed = parseCchostUsage(usagePayload)
-              endpointName = parsed.endpointName
+              parsedUsage = parseCchostUsage(usagePayload, {
+                now: nowFn(),
+                utilizationScale: pluginOptions?.utilizationScale ?? "auto",
+                nodeWeights: pluginOptions?.nodeWeights,
+                tierWeights: pluginOptions?.tierWeights,
+              })
             } catch (err) {
               if (err?.status === 401) {
                 return {
@@ -369,8 +428,43 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
 
             const label =
               (typeof inputs.label === "string" && inputs.label.trim()) ||
-              endpointName ||
+              parsedUsage?.endpointName ||
               defaultEndpointLabel(baseUrl)
+
+            // When signing in directly (no file import needed), if the endpoint has >1
+            // upstream nodes and `splitMode === "split"`, save each upstream node as an
+            // independent usage-only Magpie card via `input.client.auth.set`.
+            let didSplit = false
+            const nodes = parsedUsage?.nodes ?? []
+            if (
+              splitMode === "split" &&
+              nodes.length > 1 &&
+              typeof input?.client?.auth?.set === "function"
+            ) {
+              const nodeCards = buildNodeCardMetadataList(nodes, {
+                baseUrl,
+                endpointLabel: label,
+                aggregation,
+                usageOnly: true,
+              })
+              let written = 0
+              for (const card of nodeCards) {
+                try {
+                  await input.client.auth.set({
+                    path: { id: card.slotKey },
+                    body: {
+                      type: "api",
+                      key: apiKey,
+                      metadata: card.metadata,
+                    },
+                  })
+                  written++
+                } catch {
+                  // Ignore if running in a minimal host without multi-slot auth.set
+                }
+              }
+              didSplit = written === nodeCards.length
+            }
 
             return {
               type: "success",
@@ -381,6 +475,7 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
                 email: label,
                 aggregation,
                 role: "endpoint",
+                splitCards: didSplit,
                 usageOnly: false,
               },
             }

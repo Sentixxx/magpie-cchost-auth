@@ -262,4 +262,54 @@ describe("parseCchostUsage", () => {
     assert.equal(wFlatFable.kind, "model_seven_day")
     assert.equal(wFlatFable.used, 66)
   })
+
+  it("unpacks nested data.nodes, group members[], and object-map limits", () => {
+    const parsed = parseCchostUsage(
+      {
+        data: {
+          nodes: [
+            {
+              id: "grp-1",
+              name: "Claude Group",
+              accountType: "claude",
+              isGroup: true,
+              members: [
+                {
+                  node_id: "m-1",
+                  node_name: "Account-A",
+                  plan: "Max 20x",
+                  status: "ready",
+                  limits: {
+                    five_hour: { utilization: 15, resets_at: inHours(3) },
+                    seven_day: { utilization: 35, resets_at: inDays(5) },
+                    seven_day_fable: { utilization: 60, resets_at: inDays(5) },
+                  },
+                },
+                {
+                  node_id: "m-2",
+                  node_name: "Account-B",
+                  plan: "Pro",
+                  status: "ready",
+                  limits: {
+                    five_hour: { utilization: 40, resets_at: inHours(2) },
+                    seven_day: { utilization: 50, resets_at: inDays(4) },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+      { now: NOW },
+    )
+
+    assert.equal(parsed.nodes.length, 2)
+    assert.equal(parsed.nodes[0].id, "m-1")
+    assert.equal(parsed.nodes[0].name, "Account-A")
+    assert.equal(parsed.nodes[0].accountType, "claude")
+    assert.equal(parsed.nodes[0].windows.find((w) => w.model === "fable").used, 60)
+    assert.equal(parsed.nodes[1].id, "m-2")
+    assert.equal(parsed.nodes[1].name, "Account-B")
+    assert.equal(parsed.nodes[1].windows.find((w) => w.kind === "five_hour").used, 40)
+  })
 })

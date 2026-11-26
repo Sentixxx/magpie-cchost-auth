@@ -380,6 +380,56 @@ export function hostApplyImport(authStore, providerId, importResults) {
 }
 
 /**
+ * Mirrors `makeClient().auth.set` + `keyFor` + `save` + `settle` in `internal/plugin/host.js`
+ * so we can test direct Method 0 sign-in splitting into multiple cards with zero file import.
+ */
+export function hostCreateSignInHarness(providerId, initialAuthStore = {}) {
+  let authStore = { ...initialAuthStore }
+  let activeScope = null
+
+  const keyFor = (id) => (activeScope && activeScope.provider === id ? activeScope.key : id)
+
+  const client = {
+    auth: {
+      set: async (opts) => {
+        const id = opts?.path?.id ?? opts?.id ?? opts?.providerID
+        const body = opts?.body ?? opts?.auth
+        if (typeof id === "string" && body && typeof body === "object") {
+          const key = keyFor(id)
+          authStore[key] = structuredClone(body)
+        }
+        return { data: true }
+      },
+      remove: async (opts) => {
+        const id = opts?.path?.id ?? opts?.id
+        if (typeof id === "string") delete authStore[keyFor(id)]
+        return { data: true }
+      },
+    },
+  }
+
+  return {
+    client,
+    getAuthStore: () => authStore,
+    async runApiAuthorize(method, inputs) {
+      const slot = !(providerId in authStore)
+        ? providerId
+        : `${providerId}#a${Object.keys(authStore).length + 1}`
+      activeScope = { provider: providerId, key: slot }
+      try {
+        const r = await method.authorize(inputs)
+        if (!r || r.type !== "success") return r
+        const applied = hostApplyImport(authStore, providerId, [r])
+        authStore = applied.authStore
+        return { ...r, savedAccount: applied.results[0]?.account }
+      } finally {
+        activeScope = null
+      }
+    },
+  }
+}
+
+/**
  * Mirrors `pluginServedCatalog` and `Account.pluginLists` in `internal/provider/plugins.go`.
  */
 export function goPluginAccountRouting(accountModelsByKey) {

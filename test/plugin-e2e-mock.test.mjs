@@ -7,6 +7,7 @@ import {
   hostExtractServers,
   hostNormalizeUsage,
   hostApplyImport,
+  hostCreateSignInHarness,
   goPluginAccountRouting,
   goQuotaOfPlugin,
   goAllowanceOf,
@@ -78,12 +79,13 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     assert.equal(badAuth.type, "failed")
     assert.match(badAuth.error, /401/)
 
-    // 2. Valid sign-in against homogeneous weighted pool (note trailing /v1 stripped automatically)
+    // 2. Valid sign-in against homogeneous weighted pool (single-card mode; trailing /v1 stripped)
     const signIn = await hooks.auth.methods[0].authorize({
       baseUrl: `${mock.baseUrl}/v1/`,
       apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
       label: "team-claude",
       aggregation: "weighted",
+      splitMode: "single",
     })
     assert.equal(signIn.type, "success")
     assert.equal(signIn.metadata.baseUrl, mock.baseUrl)
@@ -378,6 +380,76 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     const missingUsage = await hooks.auth.usage(async () => missingAuth, { models: {} })
     assert.equal(missingUsage.signIn, "kept")
     assert.match(missingUsage.error, /no longer in this CC Host endpoint/i)
+  })
+
+  it("Option B direct sign-in (no file import): Method 0 auto-splits multi-account endpoint via client.auth.set and updates idempotently", async () => {
+    const harness = hostCreateSignInHarness("cchost")
+    const switches = { show_node_breakdown: true, force_global_windows: false }
+    const hooks = await CCHostAuthPlugin(
+      {
+        client: harness.client,
+        magpie: {
+          option: (_p, k) => Boolean(switches[k]),
+          options: () => ({ ...switches }),
+        },
+      },
+      { now: () => FIXED_NOW, usageCacheMs: 5000 },
+    )
+
+    // Direct Method 0 sign-in with default splitMode ("split") — NO file import!
+    const res1 = await harness.runApiAuthorize(hooks.auth.methods[0], {
+      baseUrl: mock.baseUrl,
+      apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
+      label: "direct-pool",
+      aggregation: "weighted",
+      splitMode: "split",
+    })
+    assert.equal(res1.type, "success")
+    assert.equal(res1.metadata.splitCards, true)
+
+    const store1 = harness.getAuthStore()
+    assert.equal(Object.keys(store1).length, 4)
+
+    // Re-signing-in to the exact same endpoint updates all 4 cards in place (still 4, zero duplicates)
+    const res2 = await harness.runApiAuthorize(hooks.auth.methods[0], {
+      baseUrl: mock.baseUrl,
+      apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
+      label: "direct-pool",
+      aggregation: "weighted",
+      splitMode: "split",
+    })
+    assert.equal(res2.type, "success")
+    const store2 = harness.getAuthStore()
+    assert.equal(Object.keys(store2).length, 4)
+
+    // Verify routing isolation: primary card serves models, 3 split node cards serve {}
+    const modelMaps = {}
+    for (const [k, auth] of Object.entries(store2)) {
+      modelMaps[k] = await hooks.provider.models({ models: {} }, { auth })
+    }
+    const routing = goPluginAccountRouting(modelMaps)
+    const primaryKey = Object.entries(store2).find(([, a]) => a.metadata.role === "endpoint")[0]
+    assert.equal(routing.accountServes(primaryKey, "claude-sonnet-4-6"), true)
+    for (const [k, a] of Object.entries(store2)) {
+      if (a.metadata.role === "node") {
+        assert.equal(routing.accountServes(k, "claude-sonnet-4-6"), false)
+      }
+    }
+
+    // Verify each split card renders its own node quota + Fable cleanly
+    const cards = await Promise.all(
+      Object.entries(store2).map(async ([k, auth]) => ({
+        key: k,
+        usage: hostNormalizeUsage(
+          await hooks.auth.usage(async () => auth, { models: modelMaps[k] }),
+        ),
+      })),
+    )
+    const primaryCard = cards.find((c) => c.key === primaryKey)
+    assert.equal(primaryCard.usage.plan, "Claude ×3 (26x)")
+    assert.equal(primaryCard.usage.windows.filter((w) => w.aside).length, 0)
+    const max20Card = cards.find((c) => c.usage.user.includes("Claude-Max20x"))
+    assert.equal(max20Card.usage.windows.find((w) => w.name === "7 days · Fable").used, 50)
   })
 
   it("verifies zero external network requests were made (100% local loopback mock)", () => {

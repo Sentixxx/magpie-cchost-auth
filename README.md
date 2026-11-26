@@ -68,31 +68,20 @@ Provider plugin for **[CC Host (`cchost.ai`)](https://cchost.ai/docs/usage)** on
 
 ---
 
-## 两种显示模式：多卡独立拆开（推荐） vs 单卡聚合
+## 两种显示模式：多卡独立拆开（默认推荐） vs 单卡聚合
 
-### 模式 B：1 个端点拆成多张独立订阅卡片（`auth.import` 一键展开）
+### 模式 B：1 个端点直接拆成多张独立订阅卡片（普通接入直接生效，无需导入文件）
 
-当一个 CC Host 接入点下聚合了多个上游订阅账号时，可以准备一个极简 JSON（甚至直接导入 CC Host 给 Claude Code 生成的 `settings.json` 或 `.env`）：
-
-```json
-{
-  "baseUrl": "https://api.cchost.ai/e/your-endpoint",
-  "apiKey": "cchost_...",
-  "label": "team-claude",
-  "aggregation": "weighted"
-}
-```
-
-在 Magpie 的 CC Host 提供商里点 **「从文件导入账号…」**（`Import accounts from a file…`），插件会自动请求 `GET /v1/usage` 展开该端点下的全部 `nodes[]`，一次生成：
+直接通过 **「CC Host 接入点（Base URL + API Key）」** 登录，在 **多账号展示方式** 保持默认的 **「自动拆成多张独立卡片」**，插件会自动请求 `GET /v1/usage` 展开该端点下的全部 `nodes[]`，一次生成：
 - **1 张主端点卡**（`team-claude`）：持有全部模型并负责 Magpie 路由，展示聚合总池（`5 hours`、`7 days`、`7 days · Fable` 等）；
 - **N 张独立账号子卡**（`team-claude · <账号名>`）：每个上游订阅账号拥有**独立的卡片、独立的 5h / 7d / Fable / Opus 进度条、重置倒计时和额度历史曲线**；子卡默认返回空模型表，避免 Magpie 把同一把 Key 当成多个路由席位重复重试。
 - **合并请求去重**：Magpie 并发刷新这 N+1 张卡片时，内置 3 秒同端点 in-flight 合并缓存，只向 CC Host 发 **1 次** `GET /v1/usage`。
-- 后续如果 CC Host 上游增删了账号，重新导入一次该文件即可原地更新，不会产生重复卡片。
-- 如果只想手动添加某一个上游账号卡片，也可以在登录方式里选 **「CC Host 单个上游账号（独立额度卡片）」**。
+- 后续如果 CC Host 上游增删了账号，重新点一次普通接入即可原地更新对应卡片，不会产生重复卡片。
+- 同时依然保留 **「从文件导入账号…」**（支持 JSON / Claude Code `settings.json` / `.env` 批量导入）以及 **「CC Host 单个上游账号（独立额度卡片）」** 两种补充入口。
 
-### 模式 A：普通登录（单张卡片 + 卡内散开进度条）
+### 模式 A：合并为单张卡片（卡内散开进度条）
 
-直接通过 **「CC Host 接入点（Base URL + API Key）」** 登录时，为 1 张订阅卡片：顶部是参与路由的聚合总池，下方默认散开展示每个上游账号的独立进度条（`aside: true`，仅展示不影响路由），可在提供商编辑页用 `show_node_breakdown` 开关随时收起。
+在普通接入时将 **多账号展示方式** 选为 **「合并为单张接入点卡片」**，则只保留 1 张订阅卡片：顶部是参与路由的聚合总池，下方默认散开展示每个上游账号的独立进度条（`aside: true`，仅展示不影响路由），可在提供商编辑页用 `show_node_breakdown` 开关随时收起。
 
 ---
 
