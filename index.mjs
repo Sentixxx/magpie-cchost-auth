@@ -15,6 +15,7 @@ import { buildModelsMap } from "./lib/models.mjs"
 import { parseImportedEndpoints } from "./lib/import-parser.mjs"
 import {
   createCchostFetch,
+  createCoalescedModelsFetcher,
   createCoalescedUsageFetcher,
   fetchCchostModels,
   fetchCchostUsage,
@@ -113,6 +114,11 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
       ? pluginOptions.usageCacheMs
       : 3000
   const getUsageCoalesced = createCoalescedUsageFetcher({
+    ttlMs: usageCacheMs,
+    fetchImpl,
+    now: nowFn,
+  })
+  const getModelsCoalesced = createCoalescedModelsFetcher({
     ttlMs: usageCacheMs,
     fetchImpl,
     now: nowFn,
@@ -231,8 +237,9 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
             (n) => spec.includeOfflineNodes || n.status !== "unavailable",
           )
 
-          // 1. Primary endpoint card (placed first so it becomes the active routing seat)
-          if (spec.includeEndpointCard || nodes.length === 0) {
+          // 1. Single-node endpoint (or explicit includeEndpointCard: true): add endpoint card
+          const emitEndpointCard = spec.includeEndpointCard || nodes.length <= 1
+          if (emitEndpointCard) {
             results.push({
               type: "success",
               key: spec.apiKey,
@@ -248,10 +255,14 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
             })
           }
 
-          // 2. One independent subscription card per upstream node (when >1 node, or when
-          //    includeEndpointCard is false so user wants node cards only)
-          if (nodes.length > 1 || !spec.includeEndpointCard) {
-            const nodeCards = buildNodeCardMetadataList(nodes, {
+          // 2. When >1 upstream nodes: emit one independent subscription card per node.
+          //    Default (`includeEndpointCard: false`) emits ONLY the N real node cards
+          //    with `usageOnly: false` so Magpie shows "All N accounts" (exact 1:1 count).
+          //    With `includeEndpointCard: true`, the N node cards are `usageOnly: true`
+          //    while the extra primary endpoint card owns routing.
+          if (nodes.length > 1) {
+            const sortedNodes = [...nodes].sort((a, b) => a.id.localeCompare(b.id))
+            const nodeCards = buildNodeCardMetadataList(sortedNodes, {
               baseUrl: spec.baseUrl,
               endpointLabel,
               aggregation: spec.aggregation,
@@ -363,18 +374,25 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
               },
               options: [
                 {
-                  label: "Auto-split each upstream account into its own card (Recommended)",
-                  value: "split",
-                  hint: "Creates 1 routing card + 1 independent quota card per upstream node directly (no file import needed)",
-                  labels: { zh: "自动拆成多张独立卡片（推荐，无需导入文件）" },
-                  hints: { zh: "1 张主卡负责路由 + 接入点下每个上游账号各自 1 张独立额度卡片" },
+                  label: "Single endpoint card + per-node bars inside (Recommended)",
+                  value: "single",
+                  hint: "1 Magpie seat matching 1 CC Host endpoint (preserves upstream cache/routing); expands each node's 5h/7d/Fable bars inside Usage",
+                  labels: { zh: "1 张端点卡 + 卡内展开各节点进度条（推荐，保持上游路由与缓存）" },
+                  hints: { zh: "1 个接入点只占 1 个席位，不干扰上游缓存与路由，同时在 Usage 页展开每个节点的 5h/7d/Fable 进度条" },
                 },
                 {
-                  label: "Single combined endpoint card",
-                  value: "single",
-                  hint: "Keep 1 card for the whole endpoint (expand per-node bars inside Usage)",
-                  labels: { zh: "合并为单张接入点卡片" },
-                  hints: { zh: "只保留 1 张汇总卡（可在 Usage 页下方展开节点进度条）" },
+                  label: "Split into N separate node cards (exact node count, no extra card)",
+                  value: "nodes_only",
+                  hint: "Creates exactly N cards for N upstream nodes (Magpie shows 'All N accounts'); no redundant summary card",
+                  labels: { zh: "拆成 N 张独立节点卡（有几个号就几张卡，无多余汇总卡）" },
+                  hints: { zh: "例如 3 个上游账号正好建 3 张独立卡（顶部显示「全部 3 个账号」），无需导入文件" },
+                },
+                {
+                  label: "1 primary routing card + N read-only node cards (N+1 total)",
+                  value: "split_with_primary",
+                  hint: "Primary card owns all routing while N node cards are display-only (Usage header counts N+1)",
+                  labels: { zh: "1 张汇总路由卡 + N 张只读节点子卡（共 N+1 张）" },
+                  hints: { zh: "仅主卡参与路由，子卡纯展示独立曲线（Magpie 顶部账号数会显示为 N+1）" },
                 },
               ],
             },
@@ -390,7 +408,13 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
               return { type: "failed", error: "API Key is required" }
             }
             const aggregation = inputs.aggregation || "weighted"
-            const splitMode = inputs.splitMode === "single" ? "single" : "split"
+            const rawSplitMode = String(inputs.splitMode ?? "single").trim()
+            const splitMode =
+              rawSplitMode === "nodes_only" || rawSplitMode === "split_with_primary"
+                ? rawSplitMode
+                : rawSplitMode === "split"
+                  ? "nodes_only"
+                  : "single"
 
             let parsedUsage = null
             try {
@@ -431,17 +455,51 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
               parsedUsage?.endpointName ||
               defaultEndpointLabel(baseUrl)
 
-            // When signing in directly (no file import needed), if the endpoint has >1
-            // upstream nodes and `splitMode === "split"`, save each upstream node as an
-            // independent usage-only Magpie card via `input.client.auth.set`.
-            let didSplit = false
             const nodes = parsedUsage?.nodes ?? []
-            if (
-              splitMode === "split" &&
-              nodes.length > 1 &&
-              typeof input?.client?.auth?.set === "function"
-            ) {
-              const nodeCards = buildNodeCardMetadataList(nodes, {
+            const canWriteSiblingCards = typeof input?.client?.auth?.set === "function"
+
+            // Mode: `nodes_only` — create EXACTLY N independent node cards for N upstream
+            // nodes (no redundant N+1 summary card). Return the deterministically-first
+            // node card to `save()`, and write the remaining N-1 node cards via `client.auth.set`.
+            if (splitMode === "nodes_only" && nodes.length > 1 && canWriteSiblingCards) {
+              const sortedNodes = [...nodes].sort((a, b) => a.id.localeCompare(b.id))
+              const nodeCards = buildNodeCardMetadataList(sortedNodes, {
+                baseUrl,
+                endpointLabel: label,
+                aggregation,
+                usageOnly: false,
+              })
+              const [firstCard, ...restCards] = nodeCards
+              let written = 0
+              for (const card of restCards) {
+                try {
+                  await input.client.auth.set({
+                    path: { id: card.slotKey },
+                    body: {
+                      type: "api",
+                      key: apiKey,
+                      metadata: card.metadata,
+                    },
+                  })
+                  written++
+                } catch {
+                  // Ignore if host doesn't support multi-slot auth.set
+                }
+              }
+              if (written === restCards.length) {
+                return {
+                  type: "success",
+                  key: apiKey,
+                  metadata: firstCard.metadata,
+                }
+              }
+            }
+
+            // Mode: `split_with_primary` — 1 primary routing card + N usage-only node cards.
+            let didSplitWithPrimary = false
+            if (splitMode === "split_with_primary" && nodes.length > 1 && canWriteSiblingCards) {
+              const sortedNodes = [...nodes].sort((a, b) => a.id.localeCompare(b.id))
+              const nodeCards = buildNodeCardMetadataList(sortedNodes, {
                 baseUrl,
                 endpointLabel: label,
                 aggregation,
@@ -460,10 +518,10 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
                   })
                   written++
                 } catch {
-                  // Ignore if running in a minimal host without multi-slot auth.set
+                  // Ignore if host doesn't support multi-slot auth.set
                 }
               }
-              didSplit = written === nodeCards.length
+              didSplitWithPrimary = written === nodeCards.length
             }
 
             return {
@@ -475,7 +533,7 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
                 email: label,
                 aggregation,
                 role: "endpoint",
-                splitCards: didSplit,
+                splitCards: didSplitWithPrimary,
                 usageOnly: false,
               },
             }
@@ -695,8 +753,9 @@ export const CCHostAuthPlugin = async (input, pluginOptions = {}) => {
           return {}
         }
 
-        const rawModels = await fetchCchostModels(cfg.baseUrl, cfg.apiKey, {
+        const rawModels = await getModelsCoalesced(cfg.baseUrl, cfg.apiKey, {
           signal,
+          shared: cfg.role === "node" || cfg.splitCards,
           timeoutMs: cfg.requestTimeoutMs,
           fetchImpl,
         })
@@ -726,5 +785,6 @@ export const _internal = {
   fetchCchostUsage,
   fetchCchostModels,
   createCoalescedUsageFetcher,
+  createCoalescedModelsFetcher,
   createCchostFetch,
 }

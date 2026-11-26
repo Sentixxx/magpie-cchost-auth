@@ -256,7 +256,7 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     assert.equal(res401.headers.get("x-magpie-sign-in"), "expired")
   })
 
-  it("Option B: splits 1 multi-account endpoint into separate subscription cards via auth.import with coalesced /v1/usage and routing isolation", async () => {
+  it("Option B: splits 1 multi-account endpoint into exact N cards by default via auth.import (and optional N+1 with includeEndpointCard: true)", async () => {
     const switches = { show_node_breakdown: true, force_global_windows: false }
     const hooks = await CCHostAuthPlugin(
       {
@@ -268,7 +268,7 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
       { now: () => FIXED_NOW, usageCacheMs: 5000 },
     )
 
-    // Import Claude Code settings.json format directly!
+    // 1. Default Claude Code settings.json import -> EXACTLY 3 cards for 3 nodes (no 4th summary card!)
     const settingsText = JSON.stringify({
       env: {
         ANTHROPIC_BASE_URL: mock.baseUrl,
@@ -276,8 +276,35 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
       },
     })
 
-    const imported = await hooks.auth.import([settingsText])
-    // 1 primary endpoint card + 3 upstream node cards = 4 separate Magpie accounts!
+    const importedN = await hooks.auth.import([settingsText])
+    assert.equal(importedN.length, 3)
+    assert.ok(importedN.every((r) => r.type === "success" && r.metadata.role === "node" && r.metadata.usageOnly === false))
+
+    const appliedN = hostApplyImport({}, "cchost", importedN)
+    assert.equal(Object.keys(appliedN.authStore).length, 3)
+
+    // Concurrent /v1/models across all 3 cards coalesces into ONLY 1 HTTP request!
+    const modelCallsBefore = mock.requests.filter((r) => r.path === "/v1/models").length
+    const modelMapsN = {}
+    await Promise.all(
+      Object.entries(appliedN.authStore).map(async ([k, auth]) => {
+        modelMapsN[k] = await hooks.provider.models({ models: {} }, { auth })
+      }),
+    )
+    const modelCallsAfter = mock.requests.filter((r) => r.path === "/v1/models").length
+    assert.equal(modelCallsAfter - modelCallsBefore, 1)
+    for (const map of Object.values(modelMapsN)) {
+      assert.ok(map["claude-sonnet-4-6"])
+    }
+
+    // 2. Explicit includeEndpointCard: true -> 1 primary routing card + 3 usageOnly node cards = 4 cards
+    const explicitPrimaryText = JSON.stringify({
+      baseUrl: mock.baseUrl,
+      apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
+      includeEndpointCard: true,
+    })
+
+    const imported = await hooks.auth.import([explicitPrimaryText])
     assert.equal(imported.length, 4)
     assert.ok(imported.every((r) => r.type === "success"))
 
@@ -382,7 +409,7 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
     assert.match(missingUsage.error, /no longer in this CC Host endpoint/i)
   })
 
-  it("Option B direct sign-in (no file import): Method 0 auto-splits multi-account endpoint via client.auth.set and updates idempotently", async () => {
+  it("Option B direct sign-in (no file import): Method 0 supports nodes_only (exact N cards) and split_with_primary (N+1) idempotently", async () => {
     const harness = hostCreateSignInHarness("cchost")
     const switches = { show_node_breakdown: true, force_global_windows: false }
     const hooks = await CCHostAuthPlugin(
@@ -396,60 +423,83 @@ describe("CCHostAuthPlugin — end-to-end local mock integration", () => {
       { now: () => FIXED_NOW, usageCacheMs: 5000 },
     )
 
-    // Direct Method 0 sign-in with default splitMode ("split") — NO file import!
+    // 1. Direct Method 0 sign-in with splitMode: "nodes_only" -> EXACTLY 3 cards for 3 nodes (no 4th card!)
     const res1 = await harness.runApiAuthorize(hooks.auth.methods[0], {
       baseUrl: mock.baseUrl,
       apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
       label: "direct-pool",
       aggregation: "weighted",
-      splitMode: "split",
+      splitMode: "nodes_only",
     })
     assert.equal(res1.type, "success")
-    assert.equal(res1.metadata.splitCards, true)
+    assert.equal(res1.metadata.role, "node")
+    assert.equal(res1.metadata.usageOnly, false)
 
     const store1 = harness.getAuthStore()
-    assert.equal(Object.keys(store1).length, 4)
+    assert.equal(Object.keys(store1).length, 3)
 
-    // Re-signing-in to the exact same endpoint updates all 4 cards in place (still 4, zero duplicates)
+    // Re-signing-in updates all 3 cards in place (still 3, zero duplicates)
     const res2 = await harness.runApiAuthorize(hooks.auth.methods[0], {
       baseUrl: mock.baseUrl,
       apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
       label: "direct-pool",
       aggregation: "weighted",
-      splitMode: "split",
+      splitMode: "nodes_only",
     })
     assert.equal(res2.type, "success")
     const store2 = harness.getAuthStore()
-    assert.equal(Object.keys(store2).length, 4)
+    assert.equal(Object.keys(store2).length, 3)
 
-    // Verify routing isolation: primary card serves models, 3 split node cards serve {}
+    // Every card renders its own node quota + Fable and serves models
+    const cardsN = await Promise.all(
+      Object.entries(store2).map(async ([k, auth]) => ({
+        key: k,
+        models: await hooks.provider.models({ models: {} }, { auth }),
+        usage: hostNormalizeUsage(
+          await hooks.auth.usage(async () => auth, { models: {} }),
+        ),
+      })),
+    )
+    assert.ok(cardsN.every((c) => Boolean(c.models["claude-sonnet-4-6"])))
+    const max20 = cardsN.find((c) => c.usage.user.includes("Claude-Max20x"))
+    assert.equal(max20.usage.windows.find((w) => w.name === "7 days · Fable").used, 50)
+
+    // 2. Direct Method 0 sign-in with splitMode: "split_with_primary" -> 1 primary + 3 usageOnly = 4 cards
+    const harness2 = hostCreateSignInHarness("cchost")
+    const hooks2 = await CCHostAuthPlugin(
+      {
+        client: harness2.client,
+        magpie: {
+          option: (_p, k) => Boolean(switches[k]),
+          options: () => ({ ...switches }),
+        },
+      },
+      { now: () => FIXED_NOW, usageCacheMs: 5000 },
+    )
+    const resPrimary = await harness2.runApiAuthorize(hooks2.auth.methods[0], {
+      baseUrl: mock.baseUrl,
+      apiKey: mock.scenarios["claude-pool-weighted"].apiKey,
+      label: "primary-pool",
+      aggregation: "weighted",
+      splitMode: "split_with_primary",
+    })
+    assert.equal(resPrimary.type, "success")
+    assert.equal(resPrimary.metadata.role, "endpoint")
+    assert.equal(resPrimary.metadata.splitCards, true)
+    assert.equal(Object.keys(harness2.getAuthStore()).length, 4)
+
     const modelMaps = {}
-    for (const [k, auth] of Object.entries(store2)) {
-      modelMaps[k] = await hooks.provider.models({ models: {} }, { auth })
+    for (const [k, auth] of Object.entries(harness2.getAuthStore())) {
+      modelMaps[k] = await hooks2.provider.models({ models: {} }, { auth })
     }
     const routing = goPluginAccountRouting(modelMaps)
-    const primaryKey = Object.entries(store2).find(([, a]) => a.metadata.role === "endpoint")[0]
+    const primaryKey = Object.entries(harness2.getAuthStore()).find(([, a]) => a.metadata.role === "endpoint")[0]
     assert.equal(routing.accountServes(primaryKey, "claude-sonnet-4-6"), true)
-    for (const [k, a] of Object.entries(store2)) {
+    for (const [k, a] of Object.entries(harness2.getAuthStore())) {
       if (a.metadata.role === "node") {
         assert.equal(routing.accountServes(k, "claude-sonnet-4-6"), false)
       }
     }
-
-    // Verify each split card renders its own node quota + Fable cleanly
-    const cards = await Promise.all(
-      Object.entries(store2).map(async ([k, auth]) => ({
-        key: k,
-        usage: hostNormalizeUsage(
-          await hooks.auth.usage(async () => auth, { models: modelMaps[k] }),
-        ),
-      })),
-    )
-    const primaryCard = cards.find((c) => c.key === primaryKey)
-    assert.equal(primaryCard.usage.plan, "Claude ×3 (26x)")
-    assert.equal(primaryCard.usage.windows.filter((w) => w.aside).length, 0)
-    const max20Card = cards.find((c) => c.usage.user.includes("Claude-Max20x"))
-    assert.equal(max20Card.usage.windows.find((w) => w.name === "7 days · Fable").used, 50)
   })
 
   it("verifies zero external network requests were made (100% local loopback mock)", () => {
